@@ -1,0 +1,314 @@
+You are an assistant that will help implement a SaaS web app.
+
+## Product Summary
+
+Build a web application that automatically generates daily Instagram Stories for businesses using AI.
+
+Target example: a used car dealership (stand de carros).  
+Requirement: maintain consistent daily stories with minimal manual work.
+
+Core idea:
+- The business owner uploads product photos + basic info.
+- The system uses AI to:
+  - understand each image context,
+  - combine with product metadata,
+  - generate visually consistent Instagram Story creatives (1080x1920) with headline, body, CTA,
+  - schedule or publish these stories automatically based on user-defined rules.
+
+App will later support other verticals (e.g. fashion, real estate), but MVP is for cars.
+
+---
+
+## High-Level Architecture
+
+- Frontend: Next.js (React) + Tailwind CSS.
+- Backend: Node.js with NestJS or Express (TypeScript).
+- Database: PostgreSQL.
+- Storage: S3-compatible bucket for:
+  - original product images,
+  - generated story images.
+- AI Layer (abstract, pluggable):
+  - Vision model: analyze image content.
+  - LLM: generate short marketing copy in requested language/tone.
+  - Rendering engine: assemble final 1080x1920 story image using templates.
+
+Important:
+- Write clean, modular code.
+- Keep AI integration behind a dedicated service layer so we can swap providers.
+- Treat Instagram integration via Meta API as a separate module.
+
+---
+
+## Core User Flow
+
+1. User signs up and creates a workspace (business account).
+2. User configures:
+   - daily number of stories (e.g. 4),
+   - preferred time slots (e.g. 10:00, 14:00, 18:00, 21:00),
+   - tone of voice (casual/formal),
+   - emoji usage,
+   - brand primary color,
+   - logo upload,
+   - language (e.g. pt-PT).
+3. User adds products (cars):
+   - title,
+   - brand, model, year,
+   - mileage, price,
+   - fuel type, gearbox,
+   - 2-5 highlights,
+   - upload 3–6 photos per product.
+4. Once per day (or on demand), system:
+   - selects products intelligently:
+     - prefer new arrivals + also surface cars stuck in stock,
+     - avoid repeating same car within configurable recent days.
+   - for each time slot:
+     - pick 1 product,
+     - pick best image,
+     - call AI service to:
+       - read image context,
+       - generate headline + short body + CTA,
+       - render final story image respecting brand settings.
+   - save results as "stories" in DB.
+5. User can:
+   - view the generated stories for the day,
+   - edit texts,
+   - regenerate per story if needed,
+   - download story images.
+6. If Instagram is connected and auto-post enabled:
+   - stories are scheduled to be auto-published to Instagram Stories at configured time slots.
+
+---
+
+## Database Schema (PostgreSQL)
+
+Implement using migrations. Base schema:
+
+TABLE users:
+- id (uuid, pk)
+- name (varchar)
+- email (varchar, unique)
+- password_hash (varchar)
+- created_at (timestamptz, default now)
+
+TABLE workspaces:
+- id (uuid, pk)
+- owner_id (uuid, fk -> users.id, on delete cascade)
+- name (varchar)
+- logo_url (text, nullable)
+- primary_color (varchar(20), nullable)
+- tone_of_voice (varchar(20), default 'casual') -- 'casual' | 'formal'
+- emoji_style (boolean, default true)
+- language (varchar(10), default 'pt-PT')
+- created_at (timestamptz, default now)
+
+TABLE instagram_accounts:
+- id (uuid, pk)
+- workspace_id (uuid, fk -> workspaces.id, on delete cascade)
+- instagram_business_id (varchar)
+- page_name (varchar)
+- access_token_encrypted (text)
+- is_active (boolean, default true)
+- created_at (timestamptz, default now)
+
+TABLE products:
+- id (uuid, pk)
+- workspace_id (uuid, fk -> workspaces.id, on delete cascade)
+- title (varchar)
+- brand (varchar)
+- model (varchar)
+- year (int)
+- mileage_km (int)
+- price (numeric(12,2))
+- fuel_type (varchar)
+- gearbox (varchar)
+- highlights (jsonb) -- array of strings
+- status (varchar(20), default 'active') -- 'active' | 'sold' | 'hidden'
+- created_at (timestamptz, default now)
+- updated_at (timestamptz, default now)
+Indexes:
+- workspace_id
+- status
+
+TABLE product_images:
+- id (uuid, pk)
+- product_id (uuid, fk -> products.id, on delete cascade)
+- image_url (text)
+- is_cover (boolean, default false)
+- created_at (timestamptz, default now)
+Index:
+- product_id
+
+TABLE workspace_settings:
+- workspace_id (uuid, pk, fk -> workspaces.id, on delete cascade)
+- stories_per_day (int, default 4)
+- time_slots (jsonb, default ["10:00","14:00","18:00","21:00"])
+- auto_post_enabled (bool, default false)
+- max_repetition_days (int, default 3)
+- created_at (timestamptz, default now)
+- updated_at (timestamptz, default now)
+
+TABLE story_batches:
+- id (uuid, pk)
+- workspace_id (uuid, fk -> workspaces.id, on delete cascade)
+- date (date) -- one batch per workspace per date
+- status (varchar(20), default 'generated')
+  -- 'pending' | 'generated' | 'posted' | 'partial'
+- created_at (timestamptz, default now)
+Unique:
+- (workspace_id, date)
+Indexes:
+- (workspace_id, date)
+
+TABLE stories:
+- id (uuid, pk)
+- batch_id (uuid, fk -> story_batches.id, on delete cascade)
+- workspace_id (uuid, fk -> workspaces.id, on delete cascade)
+- product_id (uuid, fk -> products.id, nullable)
+- image_input_id (uuid, fk -> product_images.id, nullable)
+- generated_image_url (text)
+- headline (varchar(120))
+- body_text (varchar(400))
+- cta_text (varchar(200))
+- time_slot (varchar(10))
+- status (varchar(20), default 'draft')
+  -- 'draft' | 'approved' | 'edited' | 'scheduled' | 'posted'
+- created_at (timestamptz, default now)
+- updated_at (timestamptz, default now)
+Indexes:
+- workspace_id
+- batch_id
+- product_id
+
+---
+
+## Backend API Requirements
+
+Implement REST endpoints (NestJS or Express + TypeScript).
+
+Auth:
+- POST /auth/signup
+- POST /auth/login
+- GET /auth/me
+
+Workspaces:
+- GET /workspaces
+- POST /workspaces
+- GET /workspaces/:id
+- PATCH /workspaces/:id
+
+Workspace settings:
+- GET /workspaces/:id/settings
+- PATCH /workspaces/:id/settings
+  - body: { stories_per_day, time_slots, auto_post_enabled, max_repetition_days }
+
+Instagram integration:
+- POST /workspaces/:id/instagram/connect
+- GET /workspaces/:id/instagram
+- DELETE /instagram_accounts/:id
+
+Products:
+- GET /workspaces/:id/products
+- POST /workspaces/:id/products
+- GET /products/:id
+- PATCH /products/:id
+- DELETE /products/:id (soft delete via status = 'hidden')
+
+Product images:
+- POST /products/:id/images
+- DELETE /product_images/:id
+
+File upload:
+- POST /upload
+  - returns { image_url }
+
+Stories:
+- GET /workspaces/:id/stories?date=YYYY-MM-DD
+- POST /workspaces/:id/stories/generate
+  - body: { date?: string, force?: boolean }
+  - creates story_batch + stories using scheduler rules
+- PATCH /stories/:id
+  - edit headline, body_text, cta_text
+- POST /stories/:id/publish
+  - publish single story to Instagram
+- POST /story_batches/:id/publish
+  - publish all approved/scheduled stories in that batch
+
+---
+
+## Story Generation Logic (Scheduler)
+
+For each active workspace:
+
+1. Read workspace_settings.
+2. If no settings, skip.
+3. If story_batch for (workspace_id, date) exists and force=false → do nothing.
+4. If exists and force=true:
+   - delete existing stories for that batch,
+   - recreate batch.
+
+5. Select candidate products:
+   - status = 'active'
+   - not heavily repeated in last `max_repetition_days` as primary story.
+   - prioritize:
+     - newly added products,
+     - products long time on stock (to help move them).
+
+6. For each time slot (up to stories_per_day):
+   - pick product from candidates (round-robin or weighted),
+   - pick best image:
+     - prefer is_cover = true, else first.
+   - call AI layer to generate:
+     - headline (short, attractive),
+     - body_text (1–2 lines: key specs + benefits),
+     - cta_text (e.g. “Send us a DM”, “Reply to this story”, etc.)
+   - call rendering engine:
+     - overlay text + logo + brand color on top of image,
+     - output a 1080x1920 PNG.
+   - upload generated file to storage.
+   - save story row with:
+     - status = 'scheduled' if auto_post_enabled = true
+     - else status = 'draft'.
+
+7. Update story_batch.status:
+   - 'generated' if at least one story created,
+   - 'partial' if error for some slots.
+
+---
+
+## AI Service (Abstraction)
+
+Create `AiService` with methods (pseudo):
+
+- `generateStoryForProduct({ workspace, product, imageUrl }): { headline, body_text, cta_text }`
+  - uses:
+    - vision model to understand angle/context (optional for MVP),
+    - LLM with prompt that:
+      - respects workspace.tone_of_voice,
+      - uses workspace.language,
+      - can include emojis if emoji_style = true.
+
+- `renderStoryImage({ baseImageUrl, logoUrl, primaryColor, headline, bodyText, ctaText }): Buffer`
+  - uses HTML/CSS + headless browser or Canvas to produce final PNG 1080x1920.
+
+Implementation note:
+- For now you can mock AI calls, but code structure must allow easy integration with real APIs later.
+
+---
+
+## What You Should Generate Now
+
+1. Database migration files for PostgreSQL using this schema.
+2. NestJS (or Express) backend:
+   - models/entities,
+   - repositories or Prisma schema,
+   - controllers for endpoints above,
+   - StoriesService implementing the scheduler and `/generate` logic.
+3. AiService + StorageService as injectable services with placeholder implementations.
+4. (Optional) A simple Next.js dashboard:
+   - login,
+   - workspace settings form,
+   - products CRUD,
+   - daily stories view with preview and edit.
+
+Write idiomatic, production-ready TypeScript with clear separation of concerns.
+
